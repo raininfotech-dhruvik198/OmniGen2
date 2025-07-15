@@ -3,49 +3,20 @@ import dotenv
 dotenv.load_dotenv(override=True)
 
 import gradio as gr
-
 import os
 import argparse
-import random
 from datetime import datetime
-
-import torch
-from torchvision.transforms.functional import to_pil_image, to_tensor
-
-from accelerate import Accelerator
-
-from omnigen2.pipelines.omnigen2.pipeline_omnigen2 import OmniGen2Pipeline
-from omnigen2.models.transformers.transformer_omnigen2 import OmniGen2Transformer2DModel
-from omnigen2.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
-from omnigen2.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
-from omnigen2.utils.img_util import create_collage
+from PIL import Image
+from predict import Predictor
 
 NEGATIVE_PROMPT = "(((deformed))), blurry, over saturation, bad anatomy, disfigured, poorly drawn face, mutation, mutated, (extra_limb), (ugly), (poorly drawn hands), fused fingers, messy drawing, broken legs censor, censored, censor_bar"
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-pipeline = None
-accelerator = None
+# Initialize the predictor
+predictor = Predictor()
+predictor.setup()
+
 save_images = False
-
-def load_pipeline(accelerator, weight_dtype, args):
-    pipeline = OmniGen2Pipeline.from_pretrained(
-        args.model_path,
-        torch_dtype=weight_dtype,
-        trust_remote_code=True,
-    )
-    pipeline.transformer = OmniGen2Transformer2DModel.from_pretrained(
-        args.model_path,
-        subfolder="transformer",
-        torch_dtype=weight_dtype,
-    )
-    if args.enable_sequential_cpu_offload:
-        pipeline.enable_sequential_cpu_offload()
-    elif args.enable_model_cpu_offload:
-        pipeline.enable_model_cpu_offload()
-    else:
-        pipeline = pipeline.to(accelerator.device)
-    return pipeline
-
 
 def run(
     instruction,
@@ -67,73 +38,48 @@ def run(
     seed_input,
     progress=gr.Progress(),
 ):
-    input_images = [image_input_1, image_input_2, image_input_3]
-    input_images = [img for img in input_images if img is not None]
+    # Convert Gradio images to paths
+    def save_image_to_temp(image):
+        if image is None:
+            return None
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        temp_path = os.path.join("/tmp", f"{timestamp}.png")
+        image.save(temp_path)
+        return temp_path
 
-    if len(input_images) == 0:
-        input_images = None
+    image_path_1 = save_image_to_temp(image_input_1)
+    image_path_2 = save_image_to_temp(image_input_2)
+    image_path_3 = save_image_to_temp(image_input_3)
 
-    if seed_input == -1:
-        seed_input = random.randint(0, 2**16 - 1)
-
-    generator = torch.Generator(device=accelerator.device).manual_seed(seed_input)
-
-    def progress_callback(cur_step, timesteps):
-        frac = (cur_step + 1) / float(timesteps)
-        progress(frac)
-
-    if scheduler == 'euler':
-        pipeline.scheduler = FlowMatchEulerDiscreteScheduler()
-    elif scheduler == 'dpmsolver++':
-        pipeline.scheduler = DPMSolverMultistepScheduler(
-            algorithm_type="dpmsolver++",
-            solver_type="midpoint",
-            solver_order=2,
-            prediction_type="flow_prediction",
-        )
-
-    results = pipeline(
-        prompt=instruction,
-        input_images=input_images,
-        width=width_input,
-        height=height_input,
+    output_path = predictor.predict(
+        instruction=instruction,
+        image_input_1=image_path_1,
+        image_input_2=image_path_2,
+        image_input_3=image_path_3,
+        width_input=width_input,
+        height_input=height_input,
+        scheduler=scheduler,
+        num_inference_steps=num_inference_steps,
+        negative_prompt=negative_prompt,
+        guidance_scale_input=guidance_scale_input,
+        img_guidance_scale_input=img_guidance_scale_input,
+        cfg_range_start=cfg_range_start,
+        cfg_range_end=cfg_range_end,
+        num_images_per_prompt=num_images_per_prompt,
         max_input_image_side_length=max_input_image_side_length,
         max_pixels=max_pixels,
-        num_inference_steps=num_inference_steps,
-        max_sequence_length=1024,
-        text_guidance_scale=guidance_scale_input,
-        image_guidance_scale=img_guidance_scale_input,
-        cfg_range=(cfg_range_start, cfg_range_end),
-        negative_prompt=negative_prompt,
-        num_images_per_prompt=num_images_per_prompt,
-        generator=generator,
-        output_type="pil",
-        step_func=progress_callback,
+        seed_input=seed_input,
     )
 
-    progress(1.0)
-
-    vis_images = [to_tensor(image) * 2 - 1 for image in results.images]
-    output_image = create_collage(vis_images)
+    output_image = Image.open(output_path)
 
     if save_images:
-        # Create outputs directory if it doesn't exist
         output_dir = os.path.join(ROOT_DIR, "outputs_gradio")
         os.makedirs(output_dir, exist_ok=True)
-
-        # Generate unique filename with timestamp
         timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
+        final_output_path = os.path.join(output_dir, f"{timestamp}.png")
+        output_image.save(final_output_path)
 
-        # Generate unique filename with timestamp
-        output_path = os.path.join(output_dir, f"{timestamp}.png")
-        # Save the image
-        output_image.save(output_path)
-
-        # Save All Generated Images
-        if len(results.images) > 1:
-            for i, image in enumerate(results.images):
-                image_name, ext = os.path.splitext(output_path)
-                image.save(f"{image_name}_{i}{ext}")
     return output_image
 
 
@@ -1060,15 +1006,6 @@ def main(args):
                     output_image = gr.Image(label="Output Image")
                     global save_images
                     save_images = gr.Checkbox(label="Save generated images", value=False)
-
-        global accelerator
-        global pipeline
-
-        bf16 = True
-        accelerator = Accelerator(mixed_precision="bf16" if bf16 else "no")
-        weight_dtype = torch.bfloat16 if bf16 else torch.float32
-
-        pipeline = load_pipeline(accelerator, weight_dtype, args)
 
         # click
         generate_button.click(

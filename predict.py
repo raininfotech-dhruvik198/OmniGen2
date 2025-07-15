@@ -6,7 +6,8 @@ import os
 import random
 from datetime import datetime
 import torch
-from torchvision.transforms.functional import to_pil_image
+from PIL import Image
+from torchvision.transforms.functional import to_tensor, to_pil_image
 from accelerate import Accelerator
 from cog import BasePredictor, Input, Path
 from omnigen2.pipelines.omnigen2.pipeline_omnigen2 import OmniGen2Pipeline
@@ -14,6 +15,7 @@ from omnigen2.models.transformers.transformer_omnigen2 import OmniGen2Transforme
 from omnigen2.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from omnigen2.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
 from omnigen2.utils.img_util import create_collage
+
 
 NEGATIVE_PROMPT = "(((deformed))), blurry, over saturation, bad anatomy, disfigured, poorly drawn face, mutation, mutated, (extra_limb), (ugly), (poorly drawn hands), fused fingers, messy drawing, broken legs censor, censored, censor_bar"
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
